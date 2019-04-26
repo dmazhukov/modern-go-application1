@@ -1,0 +1,145 @@
+workspace:
+  base: /cicd
+pipeline:
+  create_cluster:
+    image: banzaicloud/ci-pipeline-client:0.10
+    cluster:
+      name: bz
+      location: europe-west4-a
+      cloud: google
+      secretId: 257336960ce6654db51d57fbd9ca89f7c76b50fcb4d44d9680b081db64f3d7dd
+      secretName: ""
+      profileName: ""
+      postHooks:
+        InstallLogging:
+          bucketName: xxxxxxxxxxxxxx
+          secretId: 4cf6829aa93728e8f3c97df913fb1bfa95fe5810e2933a05943f8312a98d9cf2
+        InstallMonitoring:
+          enabled: true
+      properties:
+        gke:
+          nodeVersion: 1.12.7-gke.10
+          nodePools:
+            pool1:
+              autoscaling: true
+              minCount: 1
+              maxCount: 3
+              count: 1
+              instanceType: g1-small
+              preemptible: true
+              labels:
+                cpu: shared
+            pool2:
+              autoscaling: true
+              minCount: 1
+              maxCount: 2
+              count: 1
+              instanceType: n1-standard-1
+              preemptible: true
+              labels:
+                cpu: hi
+            system:
+              autoscaling: false
+              minCount: 0
+              maxCount: 0
+              count: 1
+              instanceType: n1-standard-2
+              preemptible: true
+              labels:
+                cpu: hi
+          master:
+            version: 1.12.7-gke.10
+          projectId: vault-5e70516c33ebfb2c
+    action: EnsureCluster
+  test:
+    image: golang:1.12
+    commands: make check
+    environment:
+      GOFLAGS: -mod=readonly
+  build_image:
+    dockerfile: Dockerfile
+    image: plugins/docker
+    repo: '{{ .CICD_REPO }}'
+    secretFrom:
+      DOCKER_PASSWORD:
+        keyRef: password
+        name: docker-hub
+      DOCKER_USERNAME:
+        keyRef: username
+        name: docker-hub
+    tags: '{{ trunc 7 .CICD_COMMIT_SHA }}'
+  package_application:
+    when:
+      branch:
+        include:
+        - master
+    image: lachlanevenson/k8s-helm:latest
+    commands:
+    - helm init -c
+    - helm repo add banzaicloud-stable http://kubernetes-charts.banzaicloud.com/branch/master
+    - helm package ./.banzaicloud/charts/spotguide-modern-go-application
+  install_mysql_user_credentials_secret:
+    action: InstallSecret
+    clusterSecret:
+      merge: true
+      name: '{{ .CICD_REPO_NAME }}-mysql-user'
+      namespace: modern-go-application
+      sourceSecretName: modern-go-application1-mysql-user-credentials
+      spec:
+      - name: mysql-username
+        source: username
+      - name: mysql-password
+        source: password
+    image: banzaicloud/ci-pipeline-client:0.10
+    when:
+      branch:
+        include:
+        - master
+  deploy_application:
+    action: EnsureDeployment
+    deployment:
+      name: ./spotguide-modern-go-application-0.2.0.tgz
+      namespace: modern-go-application
+      releaseName: '{{ .CICD_REPO_NAME }}'
+      reuseValues: true
+      timeout: 900
+      values:
+        application:
+          config:
+            instrumentation:
+              prometheus:
+                enabled: true
+          image:
+            pullPolicy: Always
+            repository: '{{ .CICD_REPO }}'
+            tag: '{{ trunc 7 .CICD_COMMIT_SHA }}'
+          ingress:
+            annotations:
+              kubernetes.io/ingress.class: traefik
+              traefik.ingress.kubernetes.io/redirect-permanent: "true"
+              traefik.ingress.kubernetes.io/redirect-regex: ^http://(.*)
+              traefik.ingress.kubernetes.io/redirect-replacement: https://$1
+            enabled: true
+            hosts:
+            - app-{{ .CICD_REPO_NAME }}.{{ .CLUSTER_NAME }}.{{ .ORG_NAME }}.{{ .DOMAIN_NAME }}
+        mysql:
+          database: app
+          enabled: true
+          existingUserSecret: '{{ .CICD_REPO_NAME }}-mysql-user'
+          metrics:
+            enabled: true
+          port: null
+        nameOverride: '{{ .CICD_REPO_NAME }}'
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 150m
+            memory: 128Mi
+      wait: true
+    image: banzaicloud/ci-pipeline-client:0.10
+    when:
+      branch:
+        include:
+        - master
